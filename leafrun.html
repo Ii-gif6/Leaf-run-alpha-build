@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>LeafRun_v1.0.2</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            margin: 0;
+            padding: 0;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #111;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        #gameContainer {
+            position: relative;
+            width: 100vw;
+            height: 66.67vw;
+            max-width: 480px;
+            max-height: 320px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            background: #87ceeb;
+            border: 2px solid #222;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+        #shineOverlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 50%;
+            background: linear-gradient(
+                to bottom,
+                rgba(255, 255, 255, 0.28) 0%,
+                rgba(255, 255, 255, 0.12) 50%,
+                rgba(255, 255, 255, 0.0) 100%
+            );
+            pointer-events: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="gameContainer">
+        <div id="shineOverlay"></div>
+        <canvas id="gameCanvas" width="480" height="320"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+
+        // ---------- Core state ----------
+        let gameState = 'START'; // START, PLAYING, BLACKOUT, PLAYING_CORRUPT, GAMEOVER
+        let distance = 0;
+        let highDistance = 0;
+        const groundY = 260;
+        let gameSpeed = 3.8;
+        let spawnTimer = 0;
+        let bgScroll = 0;
+
+        // Level pacing: 1 level per ~5 distance units, blackout hits at level 30
+        const DIST_PER_LEVEL = 5;
+        const BLACKOUT_LEVEL = 30;
+        let level = 1;
+        let blackoutTimer = 0;
+        const BLACKOUT_DURATION = 95; // frames of full black hold
+        let screenShake = 0;
+
+        const player = {
+            x: 60,
+            y: 224,
+            width: 36,
+            height: 36,
+            gravity: 0.38,
+            velocity: 0,
+            jumpStrength: -7.5,
+            isGrounded: true,
+            flickerOn: true,
+            flickerTimer: 0
+        };
+
+        let obstacles = [];
+        let particles = []; // ambient dread motes / post-corrupt debris
+
+        // 12x12 leaf sprite and 6x6 spike sprite, 1 = filled pixel
+        const artMatrices = {
+            leaf: [
+                [0,0,0,0,1,1,1,1,0,0,0,0],
+                [0,0,0,1,1,1,1,1,1,0,0,0],
+                [0,0,1,1,1,1,1,1,1,1,0,0],
+                [0,1,1,1,0,1,1,0,1,1,1,0],
+                [1,1,1,1,1,1,1,1,1,1,1,1],
+                [1,1,1,1,1,1,1,1,1,1,1,1],
+                [1,1,1,0,1,1,1,1,0,1,1,1],
+                [0,1,1,1,1,1,1,1,1,1,1,0],
+                [0,0,1,1,1,1,1,1,1,1,0,0],
+                [0,0,0,1,1,0,0,1,1,0,0,0],
+                [0,0,0,0,1,1,1,1,0,0,0,0],
+                [0,0,0,0,0,1,1,0,0,0,0,0]
+            ],
+            // Distorted variant used post-corruption: jagged, asymmetric, "wrong"
+            leafCorrupt: [
+                [0,0,0,1,1,0,1,1,0,0,1,0],
+                [0,0,1,1,0,1,1,1,1,0,0,0],
+                [0,1,1,1,1,0,1,1,1,1,1,0],
+                [1,1,0,1,1,1,1,0,1,1,0,1],
+                [1,1,1,1,0,1,1,1,0,1,1,1],
+                [1,0,1,1,1,1,1,1,1,1,0,1],
+                [1,1,1,0,1,0,1,1,0,1,1,1],
+                [0,1,1,1,1,1,1,0,1,1,1,0],
+                [0,0,1,0,1,1,1,1,1,0,1,0],
+                [0,1,0,1,1,0,1,1,0,1,0,0],
+                [0,0,0,1,1,1,1,1,0,0,1,0],
+                [0,0,1,0,0,1,0,1,0,0,0,0]
+            ],
+            spike: [
+                [1,0,0,0,0,1],
+                [1,1,0,0,1,1],
+                [1,1,1,1,1,1],
+                [1,1,1,1,1,1],
+                [1,1,1,1,1,1],
+                [1,1,1,1,1,1]
+            ],
+            // Broken-glass style shard used post-corruption instead of a "gore" spike
+            shard: [
+                [0,1,0,0,1,0],
+                [1,1,0,1,1,0],
+                [1,0,1,1,0,1],
+                [0,1,1,0,1,1],
+                [1,1,0,1,1,1],
+                [1,0,1,1,0,1]
+            ]
+        };
+
+        const startBtnArea = { x: 150, y: 195, w: 180, h: 45 };
+        const retryBtnArea = { x: 150, y: 210, w: 180, h: 45 };
+
+        let audioCtx = null;
+        let droneOsc = null;
+        let droneGain = null;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+        }
+
+        function playSound(type) {
+            if (!audioCtx) return;
+            try {
+                let osc = audioCtx.createOscillator();
+                let gain = audioCtx.createGain();
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                if (type === 'jump') {
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(140, audioCtx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(350, audioCtx.currentTime + 0.12);
+                    gain.gain.setValueAtTime(0.04, audioCtx.currentTime);
+                    osc.start(); osc.stop(audioCtx.currentTime + 0.12);
+                } else if (type === 'click') {
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(260, audioCtx.currentTime);
+                    gain.gain.setValueAtTime(0.06, audioCtx.currentTime);
+                    osc.start(); osc.stop(audioCtx.currentTime + 0.08);
+                } else if (type === 'glitch') {
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(70, audioCtx.currentTime);
+                    gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                    osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+                } else if (type === 'score') {
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(520, audioCtx.currentTime);
+                    gain.gain.setValueAtTime(0.03, audioCtx.currentTime);
+                    osc.start(); osc.stop(audioCtx.currentTime + 0.06);
+                } else if (type === 'blackout') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(50, audioCtx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(18, audioCtx.currentTime + 1.4);
+                    gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.16, audioCtx.currentTime + 0.3);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 1.4);
+                    osc.start(); osc.stop(audioCtx.currentTime + 1.45);
+                } else if (type === 'corruptStinger') {
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(220, audioCtx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.15);
+                    gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.35);
+                    osc.start(); osc.stop(audioCtx.currentTime + 0.35);
+                }
+            } catch(e) {}
+        }
+
+        // Slowly-building low drone that fades in after level ~20
+        function updateDrone(intensity) {
+            if (!audioCtx) return;
+            if (intensity <= 0) {
+                if (droneGain) {
+                    droneGain.gain.setTargetAtTime(0.0001, audioCtx.currentTime, 0.3);
+                }
+                return;
+            }
+            if (!droneOsc) {
+                droneOsc = audioCtx.createOscillator();
+                droneGain = audioCtx.createGain();
+                droneOsc.type = 'sine';
+                droneOsc.frequency.setValueAtTime(55, audioCtx.currentTime);
+                droneGain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+                droneOsc.connect(droneGain);
+                droneGain.connect(audioCtx.destination);
+                droneOsc.start();
+            }
+            droneGain.gain.setTargetAtTime(Math.min(0.05, intensity * 0.05), audioCtx.currentTime, 0.5);
+            droneOsc.frequency.setTargetAtTime(55 - intensity * 15, audioCtx.currentTime, 0.5);
+        }
+
+        function handleInputEvent(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            const canvasX = ((clientX - rect.left) / rect.width) * canvas.width;
+            const canvasY = ((clientY - rect.top) / rect.height) * canvas.height;
+
+            if (gameState === 'START') {
+                if (canvasX >= startBtnArea.x && canvasX <= startBtnArea.x + startBtnArea.w &&
+                    canvasY >= startBtnArea.y && canvasY <= startBtnArea.y + startBtnArea.h) {
+                    initAudio();
+                    playSound('click');
+                    startGame();
+                }
+            } else if (gameState === 'PLAYING' || gameState === 'PLAYING_CORRUPT') {
+                if (player.isGrounded) {
+                    player.velocity = player.jumpStrength;
+                    player.isGrounded = false;
+                    playSound('jump');
+                }
+            } else if (gameState === 'GAMEOVER') {
+                if (canvasX >= retryBtnArea.x && canvasX <= retryBtnArea.x + retryBtnArea.w &&
+                    canvasY >= retryBtnArea.y && canvasY <= retryBtnArea.y + retryBtnArea.h) {
+                    playSound('click');
+                    startGame();
+                }
+            }
+        }
+
+        window.addEventListener('touchstart', function(e) {
+            e.preventDefault();
+            if (e.touches.length > 0) {
+                handleInputEvent(e.touches[0].clientX, e.touches[0].clientY);
+            }
+        }, { passive: false });
+
+        window.addEventListener('mousedown', function(e) {
+            handleInputEvent(e.clientX, e.clientY);
+        });
+
+        window.addEventListener('keydown', function(e) {
+            if (e.code === 'Space' || e.code === 'ArrowUp') {
+                e.preventDefault();
+                if (gameState === 'PLAYING' || gameState === 'PLAYING_CORRUPT') {
+                    if (player.isGrounded) {
+                        player.velocity = player.jumpStrength;
+                        player.isGrounded = false;
+                        playSound('jump');
+                    }
+                } else if (gameState === 'START' || gameState === 'GAMEOVER') {
+                    initAudio();
+                    startGame();
+                }
+            }
+        });
+
+        function startGame() {
+            gameState = 'PLAYING';
+            distance = 0;
+            level = 1;
+            gameSpeed = 3.8;
+            spawnTimer = 0;
+            obstacles = [];
+            particles = [];
+            blackoutTimer = 0;
+            screenShake = 0;
+            player.y = groundY - player.height;
+            player.velocity = 0;
+            player.isGrounded = true;
+            player.flickerOn = true;
+            updateDrone(0);
+        }
+
+        function triggerGameOver() {
+            gameState = 'GAMEOVER';
+            playSound('glitch');
+            updateDrone(0);
+            if (distance > highDistance) {
+                highDistance = distance;
+            }
+        }
+
+        function spawnObstacle() {
+            const size = 24;
+            obstacles.push({
+                x: 500,
+                y: groundY - size,
+                width: size,
+                height: size,
+                passed: false
+            });
+        }
+
+        function rectsOverlap(a, b) {
+            return a.x < b.x + b.width &&
+                   a.x + a.width > b.x &&
+                   a.y < b.y + b.height &&
+                   a.y + a.height > b.y;
+        }
+
+        // Dread motes that drift in as the level climbs (pre-corruption)
+        function maybeSpawnParticle(dreadAmount) {
+            if (Math.random() < dreadAmount * 0.06) {
+                particles.push({
+                    x: 500,
+                    y: Math.random() * groundY,
+                    r: 1 + Math.random() * 2,
+                    speed: 0.4 + Math.random() * 0.6,
+                    drift: (Math.random() - 0.5) * 0.3,
+                    life: 1
+                });
+            }
+        }
+
+        function update() {
+            const dreadAmount = Math.max(0, Math.min(1, (level - 10) / 20)); // ramps levels 10->30
+            bgScroll = (bgScroll - (gameState.startsWith('PLAYING') ? gameSpeed * 0.5 : 0.8)) % 480;
+
+            if (screenShake > 0) screenShake *= 0.9;
+            if (screenShake < 0.05) screenShake = 0;
+
+            if (gameState === 'PLAYING' || gameState === 'PLAYING_CORRUPT') {
+                distance += 0.05;
+                level = Math.floor(distance / DIST_PER_LEVEL) + 1;
+                gameSpeed = Math.min(6.5, 3.8 + (distance * 0.015));
+
+                updateDrone(gameState === 'PLAYING' ? dreadAmount : 0.3);
+
+                // Trigger the blackout the instant we cross level 30, only once
+                if (gameState === 'PLAYING' && level >= BLACKOUT_LEVEL) {
+                    gameState = 'BLACKOUT';
+                    blackoutTimer = BLACKOUT_DURATION;
+                    playSound('blackout');
+                    updateDrone(0);
+                    return;
+                }
+
+                player.velocity += player.gravity;
+                player.y += player.velocity;
+
+                if (player.y >= groundY - player.height) {
+                    player.y = groundY - player.height;
+                    player.velocity = 0;
+                    player.isGrounded = true;
+                    if (gameState === 'PLAYING_CORRUPT') screenShake = 3;
+                }
+
+                // Sprite flicker kicks in once dread builds, gets worse post-corrupt
+                const flickerChance = gameState === 'PLAYING_CORRUPT' ? 0.10 : dreadAmount * 0.04;
+                player.flickerTimer -= 1;
+                if (player.flickerTimer <= 0) {
+                    if (Math.random() < flickerChance) {
+                        player.flickerOn = !player.flickerOn;
+                        player.flickerTimer = 3 + Math.random() * 6;
+                    } else {
+                        player.flickerOn = true;
+                        player.flickerTimer = 10;
+                    }
+                }
+
+                spawnTimer -= gameSpeed;
+                if (spawnTimer <= 0) {
+                    spawnObstacle();
+                    const jitter = gameState === 'PLAYING_CORRUPT' ? Math.random() * 40 - 20 : 0;
+                    spawnTimer = 90 + Math.random() * 80 + jitter;
+                }
+
+                for (let i = obstacles.length - 1; i >= 0; i--) {
+                    const o = obstacles[i];
+                    o.x -= gameSpeed;
+
+                    const hitbox = {
+                        x: player.x + 6,
+                        y: player.y + 6,
+                        width: player.width - 12,
+                        height: player.height - 12
+                    };
+
+                    if (rectsOverlap(hitbox, o)) {
+                        triggerGameOver();
+                    }
+
+                    if (!o.passed && o.x + o.width < player.x) {
+                        o.passed = true;
+                        playSound('score');
+                    }
+
+                    if (o.x + o.width < -20) {
+                        obstacles.splice(i, 1);
+                    }
+                }
+
+                maybeSpawnParticle(gameState === 'PLAYING_CORRUPT' ? 1 : dreadAmount);
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    const p = particles[i];
+                    p.x -= p.speed + gameSpeed * 0.2;
+                    p.y += p.drift;
+                    if (p.x < -10) particles.splice(i, 1);
+                }
+
+            } else if (gameState === 'BLACKOUT') {
+                blackoutTimer -= 1;
+                if (blackoutTimer === Math.floor(BLACKOUT_DURATION * 0.4)) {
+                    playSound('corruptStinger');
+                }
+                if (blackoutTimer <= 0) {
+                    gameState = 'PLAYING_CORRUPT';
+                    obstacles = [];
+                    particles = [];
+                    spawnTimer = 40;
+                    screenShake = 8;
+                }
+            }
+        }
+
+        function drawMatrix(matrix, px, py, pixelSize, color) {
+            ctx.fillStyle = color;
+            for (let row = 0; row < matrix.length; row++) {
+                for (let col = 0; col < matrix[row].length; col++) {
+                    if (matrix[row][col] === 1) {
+                        ctx.fillRect(
+                            px + col * pixelSize,
+                            py + row * pixelSize,
+                            pixelSize,
+                            pixelSize
+                        );
+                    }
+                }
+            }
+        }
+
+        function skyColor(dreadAmount) {
+            const r = Math.round(135 - dreadAmount * 120);
+            const g = Math.round(206 - dreadAmount * 190);
+            const b = Math.round(235 - dreadAmount * 200);
+            return `rgb(${r},${g},${b})`;
+        }
+
+        function groundColor(dreadAmount) {
+            const r = Math.round(80 - dreadAmount * 60);
+            const g = Math.round(140 - dreadAmount * 120);
+            const b = Math.round(60 - dreadAmount * 50);
+            return `rgb(${r},${g},${b})`;
+        }
+
+        function drawVignette(strength) {
+            if (strength <= 0) return;
+            const grad = ctx.createRadialGradient(
+                canvas.width / 2, canvas.height / 2, canvas.width * 0.2,
+                canvas.width / 2, canvas.height / 2, canvas.width * 0.7
+            );
+            grad.addColorStop(0, 'rgba(0,0,0,0)');
+            grad.addColorStop(1, `rgba(0,0,0,${Math.min(0.85, strength)})`);
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        function drawGroundCracks(dreadAmount) {
+            if (dreadAmount < 0.15) return;
+            ctx.strokeStyle = `rgba(20,10,10,${Math.min(0.6, dreadAmount)})`;
+            ctx.lineWidth = 1;
+            const count = Math.floor(dreadAmount * 8);
+            for (let i = 0; i < count; i++) {
+                const seedX = ((i * 137 + Math.floor(bgScroll)) % (canvas.width + 60)) - 30;
+                ctx.beginPath();
+                ctx.moveTo(seedX, groundY + 4);
+                ctx.lineTo(seedX + 6, groundY + 14);
+                ctx.lineTo(seedX - 4, groundY + 24);
+                ctx.stroke();
+            }
+        }
+
+        function drawStaticNoise(amount) {
+            if (amount <= 0) return;
+            const dots = Math.floor(amount * 90);
+            for (let i = 0; i < dots; i++) {
+                const x = Math.random() * canvas.width;
+                const y = Math.random() * canvas.height;
+                const shade = Math.random() > 0.5 ? '255,255,255' : '0,0,0';
+                ctx.fillStyle = `rgba(${shade},${Math.random() * 0.5})`;
+                ctx.fillRect(x, y, 2, 2);
+            }
+        }
+
+        function draw() {
+            ctx.save();
+            if (screenShake > 0) {
+                ctx.translate((Math.random() - 0.5) * screenShake, (Math.random() - 0.5) * screenShake);
+            }
+
+            ctx.clearRect(-10, -10, canvas.width + 20, canvas.height + 20);
+
+            if (gameState === 'BLACKOUT') {
+                // Full hold: pure black, nothing else drawn. The pause IS the scare.
+                ctx.fillStyle = '#000';
+                ctx.fillRect(-10, -10, canvas.width + 20, canvas.height + 20);
+                ctx.restore();
+                return;
+            }
+
+            const dreadAmount = Math.max(0, Math.min(1, (level - 10) / 20));
+            const corrupt = gameState === 'PLAYING_CORRUPT';
+
+            if (corrupt) {
+                // High-contrast palette instead of a blue sky
+                ctx.fillStyle = '#7a0000';
+                ctx.fillRect(0, 0, canvas.width, groundY);
+                const flashGrad = ctx.createLinearGradient(0, 0, 0, groundY);
+                flashGrad.addColorStop(0, 'rgba(20,0,0,0.5)');
+                flashGrad.addColorStop(1, 'rgba(0,0,0,0.1)');
+                ctx.fillStyle = flashGrad;
+                ctx.fillRect(0, 0, canvas.width, groundY);
+
+                ctx.fillStyle = '#1a0000';
+                ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+            } else {
+                ctx.fillStyle = skyColor(dreadAmount);
+                ctx.fillRect(0, 0, canvas.width, groundY);
+
+                ctx.fillStyle = groundColor(dreadAmount);
+                ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+                ctx.fillStyle = 'rgba(0,0,0,0.1)';
+                for (let x = bgScroll; x < canvas.width; x += 40) {
+                    ctx.fillRect(x, groundY, 20, canvas.height - groundY);
+                }
+                drawGroundCracks(dreadAmount);
+            }
+
+            // Ambient dread motes
+            particles.forEach(p => {
+                ctx.fillStyle = corrupt ? 'rgba(120,0,0,0.7)' : `rgba(10,10,10,${0.15 + dreadAmount * 0.25})`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Player
+            if (gameState === 'PLAYING' || gameState === 'PLAYING_CORRUPT') {
+                if (player.flickerOn) {
+                    const sprite = corrupt ? artMatrices.leafCorrupt : artMatrices.leaf;
+                    const color = corrupt ? '#e8c8c8' : '#2e7d32';
+                    const pixelSize = player.width / sprite[0].length;
+                    drawMatrix(sprite, player.x, player.y, pixelSize, color);
+                }
+
+                // Obstacles
+                obstacles.forEach(o => {
+                    const sprite = corrupt ? artMatrices.shard : artMatrices.spike;
+                    const color = corrupt ? '#c9c9c9' : '#5d1a1a';
+                    const ps = o.width / sprite[0].length;
+                    drawMatrix(sprite, o.x, o.y, ps, color);
+                });
+            }
+
+            if (!corrupt) {
+                drawVignette(dreadAmount * 0.75);
+            } else {
+                drawStaticNoise(0.35);
+            }
+
+            // UI
+            ctx.fillStyle = corrupt ? '#e8c8c8' : '#fff';
+            ctx.font = '16px monospace';
+            ctx.textAlign = 'left';
+
+            if (gameState === 'PLAYING' || gameState === 'PLAYING_CORRUPT') {
+                ctx.fillText('Dist: ' + Math.floor(distance), 10, 24);
+                ctx.font = '12px monospace';
+                ctx.fillText('Lv ' + level, 10, 42);
+            } else if (gameState === 'START') {
+                ctx.textAlign = 'center';
+                ctx.font = 'bold 28px monospace';
+                ctx.fillText('LeafRun', canvas.width / 2, 100);
+                ctx.font = '14px monospace';
+                ctx.fillText('Tap or press Space to jump', canvas.width / 2, 140);
+
+                ctx.fillStyle = '#2e7d32';
+                ctx.fillRect(startBtnArea.x, startBtnArea.y, startBtnArea.w, startBtnArea.h);
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 18px monospace';
+                ctx.fillText('START', canvas.width / 2, startBtnArea.y + 29);
+            } else if (gameState === 'GAMEOVER') {
+                ctx.textAlign = 'center';
+                ctx.font = 'bold 24px monospace';
+                ctx.fillText('GAME OVER', canvas.width / 2, 90);
+                ctx.font = '14px monospace';
+                ctx.fillText('Distance: ' + Math.floor(distance) + '  (Lv ' + level + ')', canvas.width / 2, 120);
+                ctx.fillText('Best: ' + Math.floor(highDistance), canvas.width / 2, 140);
+
+                ctx.fillStyle = '#2e7d32';
+                ctx.fillRect(retryBtnArea.x, retryBtnArea.y, retryBtnArea.w, retryBtnArea.h);
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 16px monospace';
+                ctx.fillText('RETRY', canvas.width / 2, retryBtnArea.y + 29);
+            }
+
+            ctx.restore();
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        gameLoop();
+    </script>
+</body>
+</html>
